@@ -82,6 +82,12 @@ void c_new_job() {
     m.u.newjob.num_slots = command_line.num_slots;
     m.u.newjob.gpus = command_line.gpus;
     m.u.newjob.wait_free_gpus = command_line.wait_free_gpus;
+    m.u.newjob.priority = command_line.priority;
+    m.u.newjob.is_background = command_line.is_background;
+    if (command_line.user)
+        m.u.newjob.user_size = strlen(command_line.user) + 1;
+    else
+        m.u.newjob.user_size = 0;
 
     /* Send the message */
     send_msg(server_socket, &m);
@@ -102,6 +108,10 @@ void c_new_job() {
 
     /* Send the environment */
     send_bytes(server_socket, myenv, m.u.newjob.env_size);
+
+    /* Send the user */
+    if (m.u.newjob.user_size > 0)
+        send_bytes(server_socket, command_line.user, m.u.newjob.user_size);
 
     free(new_command);
     free(myenv);
@@ -169,6 +179,11 @@ int c_wait_server_commands() {
             }
 
             c_end_of_job(&result);
+
+            if (command_line.is_background) {
+                continue;
+            }
+
             return result.errorlevel;
         }
     }
@@ -931,4 +946,32 @@ void c_set_logdir() {
     m.u.size = strlen(command_line.label) + 1;
     send_msg(server_socket, &m);
     send_bytes(server_socket, command_line.label, m.u.size);
+}
+
+void c_set_cooldown() {
+    struct Msg m = default_msg();
+
+    m.type = SET_COOLDOWN;
+    m.u.size = command_line.cooldown_value;
+    send_msg(server_socket, &m);
+}
+
+void c_get_cooldown() {
+    struct Msg m = default_msg();
+    int res;
+
+    m.type = GET_COOLDOWN;
+    send_msg(server_socket, &m);
+
+    res = recv_msg(server_socket, &m);
+    if (res != sizeof(m))
+        error("Error in get_cooldown");
+
+    switch (m.type) {
+        case GET_COOLDOWN_OK:
+            printf("%d\n", m.u.size);
+            return;
+        default:
+            warning("Wrong internal message in get_cooldown");
+    }
 }

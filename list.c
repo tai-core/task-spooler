@@ -43,25 +43,29 @@ char *joblistdump_headers() {
 char *joblist_headers() {
     char *line;
 
-    line = malloc(100);
+    line = malloc(150);
 #ifndef CPU
-    snprintf(line, 100, "%-4s %-10s %-20s %-8s %-6s %-5s %s [run=%i/%i]\n",
+    snprintf(line, 150, "%-4s %-10s %-20s %-8s %-6s %-4s %-10s %-5s %s [run=%i/%i]\n",
              "ID",
              "State",
              "Output",
              "E-Level",
              "Time",
+             "P",
+             "User",
              "GPUs",
              "Command",
              busy_slots,
              max_slots);
 #else
-    snprintf(line, 100, "%-4s %-10s %-20s %-8s %-6s %s [run=%i/%i]\n",
+    snprintf(line, 100, "%-4s %-10s %-20s %-8s %-6s %-4s %-10s %s [run=%i/%i]\n",
              "ID",
              "State",
              "Output",
              "E-Level",
              "Time",
+             "P",
+             "User",
              "Command",
              busy_slots,
              max_slots);
@@ -112,7 +116,8 @@ static char *print_noresult(const struct Job *p) {
     output_filename = ofilename_shown(p);
 
     maxlen = 4 + 1 + 10 + 1 + 20 + 1 + 8 + 1
-             + 25 + 1 + 5 + 1 + strlen(p->command) + 20; /* 20 is the margin for errors */
+             + 25 + 1 + 5 + 1 + 10 + 1 + strlen(p->command) + 40; /* 40 is the margin for errors */
+
 
     if (p->label)
         maxlen += 3 + strlen(p->label);
@@ -142,23 +147,27 @@ static char *print_noresult(const struct Job *p) {
         char *label = shorten(p->label, 20);
         char *cmd = shorten(p->command, cmd_len);
 #ifndef CPU
-        snprintf(line, maxlen, "%-4i %-10s %-20s %-8s %6s %-5d %s[%s]%s\n",
+        snprintf(line, maxlen, "%-4i %-10s %-20s %-8s %6s %-4d %-10s %-5d %s[%s]%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  "",
                  "",
+                 p->priority,
+                 p->user ? p->user : "-",
                  p->num_gpus,
                  dependstr,
                  label,
                  cmd);
 #else
-        snprintf(line, maxlen, "%-4i %-10s %-20s %-8s %6s %s[%s]%s\n",
+        snprintf(line, maxlen, "%-4i %-10s %-20s %-8s %6s %-4d %-10s %s[%s]%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  "",
                  "",
+                 p->priority,
+                 p->user ? p->user : "-",
                  dependstr,
                  label,
                  cmd);
@@ -169,22 +178,26 @@ static char *print_noresult(const struct Job *p) {
     else {
         char *cmd = shorten(p->command, cmd_len);
 #ifndef CPU
-        snprintf(line, maxlen, "%-4i %-10s %-20s %-8s %6s %-5d %s%s\n",
+        snprintf(line, maxlen, "%-4i %-10s %-20s %-8s %6s %-4d %-10s %-5d %s%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  "",
                  "",
+                 p->priority,
+                 p->user ? p->user : "-",
                  p->num_gpus,
                  dependstr,
                  cmd);
 #else
-        snprintf(line, maxlen, "%-4i %-10s %-20s %-8s %6s %s%s\n",
+        snprintf(line, maxlen, "%-4i %-10s %-20s %-8s %6s %-4d %-10s %s%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  "",
                  "",
+                 p->priority,
+                 p->user ? p->user : "-",
                  dependstr,
                  cmd);
 #endif
@@ -209,7 +222,7 @@ static char *print_result(const struct Job *p) {
     output_filename = ofilename_shown(p);
 
     maxlen = 4 + 1 + 10 + 1 + 20 + 1 + 8 + 1
-             + 25 + 1 + 5 + 1 + strlen(p->command) + 20; /* 20 is the margin for errors */
+             + 25 + 1 + 5 + 1 + 10 + 1 + strlen(p->command) + 40;
 
     if (p->label)
         maxlen += 3 + strlen(p->label);
@@ -239,25 +252,29 @@ static char *print_result(const struct Job *p) {
         char *label = shorten(p->label, 20);
         char *cmd = shorten(p->command, cmd_len);
 #ifndef CPU
-        snprintf(line, maxlen, "%-4i %-10s %-20s %-8i %5.2f%s %-5d %s[%s]%s\n",
+        snprintf(line, maxlen, "%-4i %-10s %-20s %-8i %5.2f%s %-4d %-10s %-5d %s[%s]%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  p->result.errorlevel,
                  real_ms,
                  unit,
+                 p->priority,
+                 p->user ? p->user : "-",
                  p->num_gpus,
                  dependstr,
                  label,
                  cmd);
 #else
-        snprintf(line, maxlen, "%-4i %-10s %-20s %-8i %5.2f%s %s[%s]%s\n",
+        snprintf(line, maxlen, "%-4i %-10s %-20s %-8i %5.2f%s %-4d %-10s %s[%s]%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  p->result.errorlevel,
                  real_ms,
                  unit,
+                 p->priority,
+                 p->user ? p->user : "-",
                  dependstr,
                  label,
                  cmd);
@@ -268,24 +285,28 @@ static char *print_result(const struct Job *p) {
     else {
         char *cmd = shorten(p->command, cmd_len);
 #ifndef CPU
-        snprintf(line, maxlen, "%-4i %-10s %-20s %-8i %5.2f%s %-5d %s%s\n",
+        snprintf(line, maxlen, "%-4i %-10s %-20s %-8i %5.2f%s %-4d %-10s %-5d %s%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  p->result.errorlevel,
                  real_ms,
                  unit,
+                 p->priority,
+                 p->user ? p->user : "-",
                  p->num_gpus,
                  dependstr,
                  cmd);
 #else
-        snprintf(line, maxlen, "%-4i %-10s %-20s %-8i %5.2f%s %s%s\n",
+        snprintf(line, maxlen, "%-4i %-10s %-20s %-8i %5.2f%s %-4d %-10s %s%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  p->result.errorlevel,
                  real_ms,
                  unit,
+                 p->priority,
+                 p->user ? p->user : "-",
                  dependstr,
                  cmd);
 #endif
@@ -321,11 +342,10 @@ static char *plainprint_noresult(const struct Job *p) {
     output_filename = ofilename_shown(p);
 
     maxlen = 4 + 1 + 10 + 1 + 20 + 1 + 8 + 1
-             + 25 + 1 + 5 + 1 + strlen(p->command) + 20; /* 20 is the margin for errors */
+             + 25 + 1 + 5 + 1 + 10 + 1 + strlen(p->command) + 40; /* 40 is the margin for errors */
 
     if (p->label)
         maxlen += 3 + strlen(p->label);
-
     if (p->depend_on_size) {
         maxlen += sizeof(dependstr);
         int pos = 0;
@@ -349,22 +369,26 @@ static char *plainprint_noresult(const struct Job *p) {
 
     if (p->label)
 #ifdef CPU
-        snprintf(line, maxlen, "%i\t%s\t%s\t%s\t%s\t%s\t[%s]\t%s\n",
+        snprintf(line, maxlen, "%i\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t[%s]\t%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  "",
                  "",
+                 p->priority,
+                 p->user ? p->user : "-",
                  dependstr,
                  p->label,
                  p->command);
 #else
-        snprintf(line, maxlen, "%i\t%s\t%s\t%s\t%s\t%d\t%s\t[%s]\t%s\n",
+        snprintf(line, maxlen, "%i\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%s\t[%s]\t%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  "",
                  "",
+                 p->priority,
+                 p->user ? p->user : "-",
                  p->num_gpus,
                  dependstr,
                  p->label,
@@ -372,21 +396,25 @@ static char *plainprint_noresult(const struct Job *p) {
 #endif
     else
 #ifdef CPU
-        snprintf(line, maxlen, "%i\t%s\t%s\t%s\t%s\t%s\t\t%s\n",
+        snprintf(line, maxlen, "%i\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t\t%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  "",
                  "",
+                 p->priority,
+                 p->user ? p->user : "-",
                  dependstr,
                  p->command);
 #else
-        snprintf(line, maxlen, "%i\t%s\t%s\t%s\t%s\t%d\t%s\t\t%s\n",
+        snprintf(line, maxlen, "%i\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%s\t\t%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  "",
                  "",
+                 p->priority,
+                 p->user ? p->user : "-",
                  p->num_gpus,
                  dependstr,
                  p->command);
@@ -409,7 +437,7 @@ static char *plainprint_result(const struct Job *p) {
     output_filename = ofilename_shown(p);
 
     maxlen = 4 + 1 + 10 + 1 + 20 + 1 + 8 + 1
-             + 25 + 1 + + 5 + 1 + strlen(p->command) + 20; /* 20 is the margin for errors */
+             + 25 + 1 + 5 + 1 + 10 + 1 + strlen(p->command) + 40; /* 40 is the margin for errors */
 
     if (p->label)
         maxlen += 3 + strlen(p->label);
@@ -437,24 +465,28 @@ static char *plainprint_result(const struct Job *p) {
 
     if (p->label)
 #ifdef CPU
-        snprintf(line, maxlen, "%i\t%s\t%s\t%i\t%.2f\t%s\t%s\t[%s]\t%s\n",
+        snprintf(line, maxlen, "%i\t%s\t%s\t%i\t%.2f\t%s\t%d\t%s\t%s\t[%s]\t%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  p->result.errorlevel,
                  real_ms,
                  unit,
+                 p->priority,
+                 p->user ? p->user : "-",
                  dependstr,
                  p->label,
                  p->command);
 #else
-        snprintf(line, maxlen, "%i\t%s\t%s\t%i\t%.2f\t%s\t%d\t%s\t[%s]\t%s\n",
+        snprintf(line, maxlen, "%i\t%s\t%s\t%i\t%.2f\t%s\t%d\t%s\t%d\t%s\t[%s]\t%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  p->result.errorlevel,
                  real_ms,
                  unit,
+                 p->priority,
+                 p->user ? p->user : "-",
                  p->num_gpus,
                  dependstr,
                  p->label,
@@ -462,23 +494,27 @@ static char *plainprint_result(const struct Job *p) {
 #endif
     else
 #ifdef CPU
-        snprintf(line, maxlen, "%i\t%s\t%s\t%i\t%.2f\t%s\t%s\t\t%s\n",
+        snprintf(line, maxlen, "%i\t%s\t%s\t%i\t%.2f\t%s\t%d\t%s\t%s\t\t%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  p->result.errorlevel,
                  real_ms,
                  unit,
+                 p->priority,
+                 p->user ? p->user : "-",
                  dependstr,
                  p->command);
 #else
-        snprintf(line, maxlen, "%i\t%s\t%s\t%i\t%.2f\t%s\t%d\t%s\t\t%s\n",
+        snprintf(line, maxlen, "%i\t%s\t%s\t%i\t%.2f\t%s\t%d\t%s\t%d\t%s\t\t%s\n",
                  p->jobid,
                  jobstate,
                  output_filename,
                  p->result.errorlevel,
                  real_ms,
                  unit,
+                 p->priority,
+                 p->user ? p->user : "-",
                  p->num_gpus,
                  dependstr,
                  p->command);

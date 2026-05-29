@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <sys/socket.h>
+#include <signal.h>
 
 #include "main.h"
 #include "cjson/cJSON.h"
@@ -42,6 +43,10 @@ static struct Notify *first_notify = 0;
 /* server will access them */
 int max_jobs;
 
+static int cooldown_seconds = 120;
+static char *last_scheduled_user = NULL;
+static time_t last_user_submit_time = 0;
+
 static struct Job *get_job(int jobid);
 
 void notify_errorlevel(struct Job *p);
@@ -67,6 +72,7 @@ static void destroy_job(struct Job* p) {
     free(p->depend_on);
     free(p->label);
     free(p->gpu_ids);
+    free(p->user);
     free(p);
 }
 
@@ -197,6 +203,18 @@ void s_kill_all_jobs(int s) {
         if (p->state == RUNNING)
             send(s, &p->pid, sizeof(int), 0);
 
+        p = p->next;
+    }
+}
+
+void preempt_background_jobs() {
+    struct Job *p;
+
+    p = firstjob;
+    while (p != 0) {
+        if (p->is_background && p->state == RUNNING) {
+            kill(-p->pid, SIGTERM);
+        }
         p = p->next;
     }
 }
@@ -663,6 +681,9 @@ int s_newjob(int s, struct Msg *m) {
     p->num_slots = m->u.newjob.num_slots;
     p->store_output = m->u.newjob.store_output;
     p->should_keep_finished = m->u.newjob.should_keep_finished;
+    p->priority = m->u.newjob.priority;
+    p->is_background = m->u.newjob.is_background;
+    p->user = NULL;
 
     /* this error level here is used internally to decide whether a job should be run or not
      * so it only matters whether the error level is 0 or not.
@@ -791,6 +812,25 @@ int s_newjob(int s, struct Msg *m) {
                       "Environment:\n%s", ptr);
         free(ptr);
     }
+
+    /* load the user */
+    if (m->u.newjob.user_size > 0) {
+        char *ptr;
+        ptr = (char *) malloc(m->u.newjob.user_size);
+        if (ptr == 0)
+            error("Cannot allocate memory in s_newjob user_size(%i)",
+                  m->u.newjob.user_size);
+        res = recv_bytes(s, ptr, m->u.newjob.user_size);
+        if (res == -1)
+            error("wrong bytes received");
+        p->user = ptr;
+    }
+
+    if (p->priority > 0) {
+        last_user_submit_time = time(NULL);
+        preempt_background_jobs();
+    }
+
     return p->jobid;
 }
 
@@ -847,82 +887,160 @@ int next_run_job() {
     int *freeGpuList = getGpuList(&numFree);
 #endif
 
-    /* Look for a runnable task */
+    /* Collect candidates that pass basic readiness checks */
+    struct Job *candidates[256];
+    int ncandidates = 0;
+    int max_priority = -1;
+
     p = firstjob;
     while (p != 0) {
-        if (p->state == QUEUED || p->state == ALLOCATING) {
-#ifndef CPU
-            if (freeGpuList == NULL) {
+        if (p->state != QUEUED && p->state != ALLOCATING) {
+            p = p->next;
+            continue;
+        }
+
+        /* cooldown window: skip background tasks if within window */
+        if (p->is_background && p->priority == 0) {
+            if ((time(NULL) - last_user_submit_time) < cooldown_seconds) {
                 p = p->next;
                 continue;
             }
+        }
 
-            if (p->num_gpus && p->wait_free_gpus) {
-                if (numFree < p->num_gpus) {
-                    /* if fewer GPUs than required then next */
-                    p = p->next;
-                    continue;
-                }
-                shuffle(freeGpuList, numFree);
-
-                /* We have to check whether some GPUs are used by other jobs, but their RAMs are still free
-                 * These GPUs should not be used.*/
-                int i = 0, j = 0;
-                /* loop until all GPUs required can be found, or there are enough GPUs */
-                int *gpu_ids = (int*) malloc(p->num_gpus * sizeof(int));
-                while (i < p->num_gpus && j < numFree) {
-                    /* if the prospective GPUs are in used, select the next one */
-                    if (!isInUse(freeGpuList[j]))
-                        gpu_ids[i++] = freeGpuList[j];
-                    j++;
-                }
-                /* some GPUs might already be claimed by other jobs, but the system still reports as free -> skip */
-                if (i < p->num_gpus) {
-                    p = p->next;
-                    free(gpu_ids);
-                    continue;
-                }
-                memcpy(p->gpu_ids, gpu_ids, p->num_gpus * sizeof(int));
-                free(gpu_ids);
-            }
-#endif
-
-            if (p->depend_on_size) {
-                int ready = 1;
-                for (int i = 0; i < p->depend_on_size; i++) {
-                    struct Job *do_depend_job = get_job(p->depend_on[i]);
-                    /* We won't try to run any job do_depending on an unfinished
-                     * job */
-                    if (do_depend_job != NULL &&
-                        (do_depend_job->state == QUEUED || do_depend_job->state == RUNNING ||
-                        do_depend_job->state == ALLOCATING)) {
-                        /* Next try */
-                        p = p->next;
-                        ready = 0;
-                        break;
-                    }
-                }
-                if (ready != 1)
-                    continue;
-            }
-
-            if (free_slots >= p->num_slots) {
-                busy_slots = busy_slots + p->num_slots;
 #ifndef CPU
-                if (p->num_gpus)
-                    broadcastUsedGpus(p->num_gpus, p->gpu_ids);
-
-                free(freeGpuList);
-#endif
-                return p->jobid;
+        if (p->num_gpus && p->wait_free_gpus) {
+            if (freeGpuList == NULL || numFree < p->num_gpus) {
+                p = p->next;
+                continue;
             }
         }
+#endif
+
+        /* dependency check */
+        if (p->depend_on_size) {
+            int ready = 1;
+            for (int i = 0; i < p->depend_on_size; i++) {
+                struct Job *do_depend_job = get_job(p->depend_on[i]);
+                if (do_depend_job != NULL && do_depend_job->is_background) {
+                    continue;
+                }
+                if (do_depend_job != NULL &&
+                    (do_depend_job->state == QUEUED || do_depend_job->state == RUNNING ||
+                    do_depend_job->state == ALLOCATING)) {
+                    ready = 0;
+                    break;
+                }
+            }
+            if (ready != 1) {
+                p = p->next;
+                continue;
+            }
+        }
+
+        /* slot check */
+        if (free_slots < p->num_slots) {
+            p = p->next;
+            continue;
+        }
+
+        if (ncandidates < 256) {
+            candidates[ncandidates++] = p;
+            if (p->priority > max_priority)
+                max_priority = p->priority;
+        } else {
+            warning("Too many ready jobs, ignoring job %d", p->jobid);
+        }
+
         p = p->next;
     }
+
+    if (ncandidates == 0) {
+#ifndef CPU
+        free(freeGpuList);
+#endif
+        return -1;
+    }
+
+    /* Filter to highest priority */
+    struct Job *top[256];
+    int ntop = 0;
+    for (int i = 0; i < ncandidates; i++) {
+        if (candidates[i]->priority == max_priority)
+            top[ntop++] = candidates[i];
+    }
+
+    if (ntop == 0) {
+#ifndef CPU
+        free(freeGpuList);
+#endif
+        return -1;
+    }
+
+    /* Fair scheduling: round-robin by user among same-priority tasks */
+    struct Job *selected = NULL;
+
+    for (int round = 0; round < 2; round++) {
+        for (int i = 0; i < ntop; i++) {
+            if (round == 0) {
+                /* prefer different user from last scheduled */
+                if (last_scheduled_user == NULL) {
+                    selected = top[i];
+                    break;
+                }
+                if (!top[i]->user || strcmp(top[i]->user, last_scheduled_user) != 0) {
+                    selected = top[i];
+                    break;
+                }
+            } else {
+                /* fallback: pick first */
+                selected = top[i];
+                break;
+            }
+        }
+        if (selected) break;
+    }
+
+    if (selected == NULL) {
+#ifndef CPU
+        free(freeGpuList);
+#endif
+        return -1;
+    }
+
+    /* Commit GPU allocation */
+#ifndef CPU
+    if (selected->num_gpus && selected->wait_free_gpus) {
+        shuffle(freeGpuList, numFree);
+        int i = 0, j = 0;
+        while (i < selected->num_gpus && j < numFree) {
+            if (!isInUse(freeGpuList[j]))
+                selected->gpu_ids[i++] = freeGpuList[j];
+            j++;
+        }
+        if (i < selected->num_gpus) {
+            free(freeGpuList);
+            return -1;
+        }
+    }
+#endif
+
+    busy_slots = busy_slots + selected->num_slots;
+
+#ifndef CPU
+    if (selected->num_gpus)
+        broadcastUsedGpus(selected->num_gpus, selected->gpu_ids);
+#endif
+
+    /* Update fair scheduling state */
+    if (selected->user) {
+        free(last_scheduled_user);
+        last_scheduled_user = strdup(selected->user);
+    }
+
 #ifndef CPU
     free(freeGpuList);
 #endif
-    return -1;
+    return selected->jobid;
 }
 
 /* Returns 1000 if no limit, The limit otherwise. */
@@ -1003,9 +1121,6 @@ static int in_notify_list(int jobid) {
 void job_finished(const struct Result *result, int jobid) {
     struct Job *p;
 
-    if (busy_slots <= 0)
-        error("Wrong state in the server. busy_slots = %i instead of greater than 0", busy_slots);
-
     p = findjob(jobid);
     if (p == 0)
         error("on jobid %i finished, it doesn't exist", jobid);
@@ -1014,6 +1129,25 @@ void job_finished(const struct Result *result, int jobid) {
     /* Recycle GPUs */
     broadcastFreeGpus(p->num_gpus, p->gpu_ids);
 #endif
+
+    /* Handle background tasks - always re-queue for next run */
+    if (p->is_background) {
+        if (p->state == RUNNING)
+            busy_slots = busy_slots - p->num_slots;
+        p->state = QUEUED;
+        p->result = *result;
+        last_finished_jobid = p->jobid;
+        notify_errorlevel(p);
+        pinfo_set_end_time(&p->info);
+        if (p->result.died_by_signal)
+            pinfo_addinfo(&p->info, 100, "Exit status: killed by signal %i\n", p->result.signal);
+        else
+            pinfo_addinfo(&p->info, 100, "Exit status: died with exit code %i\n", p->result.errorlevel);
+        return;
+    }
+
+    if (busy_slots <= 0)
+        error("Wrong state in the server. busy_slots = %i instead of greater than 0", busy_slots);
 
     /* The job may be not only in running state, but also in other states, as
      * we call this to clean up the jobs list in case of the client closing the
@@ -1860,4 +1994,18 @@ void s_get_logdir(int s) {
 void s_set_logdir(const char* path) {
     logdir = realloc(logdir, strlen(path) + 1);
     strcpy(logdir, path);
+}
+
+void s_set_cooldown(int seconds) {
+    if (seconds >= 0)
+        cooldown_seconds = seconds;
+    else
+        warning("Received cooldown=%i", seconds);
+}
+
+void s_get_cooldown(int s) {
+    struct Msg m = default_msg();
+    m.type = GET_COOLDOWN_OK;
+    m.u.size = cooldown_seconds;
+    send_msg(s, &m);
 }

@@ -59,6 +59,10 @@ static void default_command_line() {
     command_line.wait_free_gpus = 1;
     command_line.logfile = NULL;
     command_line.list_format = DEFAULT;
+    command_line.user = NULL;
+    command_line.priority = 50;
+    command_line.is_background = 0;
+    command_line.cooldown_value = 0;
 }
 
 struct Msg default_msg() {
@@ -128,6 +132,10 @@ static struct option longOptions[] = {
         {"set_gpu_free_perc", required_argument, NULL, 0},
         {"get_gpu_free_perc", no_argument,       NULL, 0},
 #endif
+        {"cooldown",          required_argument, NULL, 0},
+        {"get_cooldown",      no_argument,       NULL, 0},
+        {"priority",          required_argument, NULL, 'P'},
+        {"background",        no_argument,       NULL, 0},
         {"version",           no_argument, NULL, 'V'},
         {NULL, 0,                            NULL, 0}
 };
@@ -140,10 +148,10 @@ void parse_opts(int argc, char **argv) {
     /* Parse options */
     while (1) {
 #ifndef CPU
-        c = getopt_long(argc, argv, ":RTVhKzClnfmBEr:a:F:t:c:o:p:w:k:u:s:U:qi:N:L:dS:D:G:W:g:O:M:",
+        c = getopt_long(argc, argv, ":RTVhKzClnfmBEr:a:F:t:c:o:p:w:k:u:s:U:qi:N:L:dS:D:G:W:g:O:M:P:",
                         longOptions, &optionIdx);
 #else
-        c = getopt_long(argc, argv, ":RTVhKzClnfmBEr:a:F:t:c:o:p:w:k:u:s:U:qi:N:L:dS:D:W:O:M:",
+        c = getopt_long(argc, argv, ":RTVhKzClnfmBEr:a:F:t:c:o:p:w:k:u:s:U:qi:N:L:dS:D:W:O:M:P:",
                         longOptions, &optionIdx);
 #endif
 
@@ -173,6 +181,14 @@ void parse_opts(int argc, char **argv) {
                 } else if (strcmp(longOptions[optionIdx].name, "get_gpu_free_perc") == 0) {
                     command_line.request = c_GET_FREE_PERC;
 #endif
+                } else if (strcmp(longOptions[optionIdx].name, "cooldown") == 0) {
+                    command_line.request = c_SET_COOLDOWN;
+                    command_line.cooldown_value = atoi(optarg);
+                } else if (strcmp(longOptions[optionIdx].name, "get_cooldown") == 0) {
+                    command_line.request = c_GET_COOLDOWN;
+                } else if (strcmp(longOptions[optionIdx].name, "background") == 0) {
+                    command_line.is_background = 1;
+                    command_line.priority = 0;
                 } else
                     error("Wrong option %s.", longOptions[optionIdx].name);
                 break;
@@ -342,6 +358,14 @@ void parse_opts(int argc, char **argv) {
                     exit(-1);
                 }
                 break;
+            case 'P':
+                {
+                    int p = atoi(optarg);
+                    if (p < 0) p = 0;
+                    if (p > 100) p = 100;
+                    command_line.priority = p;
+                }
+                break;
             case ':':
                 switch (optopt) {
                     case 't':
@@ -421,6 +445,13 @@ void parse_opts(int argc, char **argv) {
     }
 
     command_line.command.num = 0;
+
+    if (command_line.user == NULL) {
+        char *tsuser = getenv("TS_USER");
+        if (tsuser) {
+            command_line.user = strdup(tsuser);
+        }
+    }
 
     /* if the request is still the default option... 
      * (the default values should be centralized) */
@@ -509,9 +540,13 @@ static void print_help(const char *cmd) {
 #ifndef CPU
     printf("  --set_gpu_free_perc   [num]                   set the value of GPU memory threshold above which GPUs are considered available (90 by default).\n");
     printf("  --get_gpu_free_perc                           get the value of GPU memory threshold above which GPUs are considered available.\n");
+    printf("  --cooldown [seconds]                          set the cooldown window (seconds) before background tasks can run after a user task is submitted (120 by default).\n");
+    printf("  --get_cooldown                                get the cooldown window value.\n");
     printf("Long option adding jobs:\n");
     printf("  --gpus                       || -G [num]      number of GPUs required by the job (1 default).\n");
     printf("  --gpu_indices                || -g [id,...]   the job will be on these GPU indices without checking whether they are free.\n");
+    printf("  --priority                   || -P [num]      set the priority of the job (0-100, default 50, 0 is background).\n");
+    printf("  --background                                  mark this job as a persistent background task (lowest priority, can be preempted).\n");
 #endif
     printf("Actions (can be performed only one at a time):\n");
     printf("  -K           kill the task spooler server\n");
@@ -762,6 +797,12 @@ int main(int argc, char **argv) {
         case c_SET_LOGDIR:
             c_set_logdir();
             break;
+        case c_SET_COOLDOWN:
+            c_set_cooldown();
+            break;
+        case c_GET_COOLDOWN:
+            c_get_cooldown();
+            break;
     }
 
     if (command_line.need_server) {
@@ -769,6 +810,7 @@ int main(int argc, char **argv) {
     }
     free(command_line.gpu_nums);
     free(command_line.logfile);
+    free(command_line.user);
 
     return errorlevel;
 }

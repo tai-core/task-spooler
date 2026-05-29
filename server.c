@@ -208,6 +208,29 @@ void server_main(int notify_fd, char *_path) {
     initGPU();
 #endif
 
+    {
+        const char *bg_conf = getenv("TS_BACKGROUND_CONF");
+        if (bg_conf) {
+            FILE *f = fopen(bg_conf, "r");
+            if (!f) {
+                warning("Cannot open TS_BACKGROUND_CONF: %s", bg_conf);
+            } else {
+                char line[4096];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n' || line[0] == '\0')
+                        continue;
+                    line[strcspn(line, "\n")] = 0;
+                    fork_background_client(line);
+                }
+                fclose(f);
+            }
+        } else {
+            const char *bg_cmd = getenv("TS_BACKGROUND_CMD");
+            if (bg_cmd)
+                fork_background_client(bg_cmd);
+        }
+    }
+
     server_loop(ls);
 }
 
@@ -531,6 +554,12 @@ client_read(int index) {
             close(s);
             remove_connection(index);
             break;
+        case SET_COOLDOWN:
+            s_set_cooldown(m.u.size);
+            break;
+        case GET_COOLDOWN:
+            s_get_cooldown(s);
+            break;
         default:
             /* Command not supported */
             /* On unknown message, we close the client,
@@ -596,5 +625,26 @@ void dump_conns_struct(FILE *out) {
 
     for (i = 0; i < nconnections; ++i) {
         dump_conn_struct(out, &client_cs[i]);
+    }
+}
+
+void fork_background_client(const char *cmd) {
+    pid_t pid = fork();
+    if (pid == -1) {
+        warning("Failed to fork background client");
+        return;
+    }
+    if (pid == 0) {
+        char ts_path[4096];
+        ssize_t len;
+#ifdef __linux__
+        len = readlink("/proc/self/exe", ts_path, sizeof(ts_path) - 1);
+        if (len != -1)
+            ts_path[len] = '\0';
+        else
+#endif
+            strcpy(ts_path, "ts");
+        execl(ts_path, ts_path, "--background", "-f", "sh", "-c", cmd, (char *)NULL);
+        exit(1);
     }
 }

@@ -55,7 +55,10 @@ enum MsgTypes {
     SET_FREE_PERC,
     GET_FREE_PERC,
     GET_LOGDIR,
-    SET_LOGDIR
+    SET_LOGDIR,
+    SET_COOLDOWN,
+    GET_COOLDOWN,
+    GET_COOLDOWN_OK
 };
 
 enum Request {
@@ -90,7 +93,9 @@ enum Request {
     c_SET_FREE_PERC,
     c_GET_FREE_PERC,
     c_GET_LOGDIR,
-    c_SET_LOGDIR
+    c_SET_LOGDIR,
+    c_SET_COOLDOWN,
+    c_GET_COOLDOWN
 };
 
 enum ListFormat {
@@ -127,6 +132,10 @@ struct CommandLine {
     int wait_free_gpus;
     char *logfile;
     enum ListFormat list_format;
+    char *user;
+    int priority;
+    int is_background;
+    int cooldown_value;
 };
 
 enum Process_type {
@@ -166,6 +175,9 @@ struct Msg {
             int num_slots;
             int gpus;
             int wait_free_gpus;
+            int priority;
+            int is_background;
+            int user_size;
         } newjob;
         struct {
             int ofilename_size;
@@ -228,6 +240,9 @@ struct Job {
     int num_gpus;
     int *gpu_ids;
     int wait_free_gpus;
+    char *user;
+    int priority;
+    int is_background;
 };
 
 enum ExitCodes {
@@ -321,6 +336,9 @@ void c_get_logdir();
 
 void c_set_logdir();
 
+void c_set_cooldown();
+void c_get_cooldown();
+
 char* get_logdir();
 
 /* jobs.c */
@@ -408,12 +426,18 @@ void s_get_logdir(int s);
 
 void s_set_logdir(const char*);
 
+void s_set_cooldown(int seconds);
+void s_get_cooldown(int s);
+void preempt_background_jobs();
+
 /* server.c */
 void server_main(int notify_fd, char *_path);
 
 void dump_conns_struct(FILE *out);
 
 void s_send_cmd(int s, int jobid);
+
+void fork_background_client(const char *cmd);
 
 /* server_start.c */
 int try_connect(int s);
