@@ -644,6 +644,15 @@ void fork_background_client(const char *cmd) {
         else
 #endif
             strcpy(ts_path, "ts");
+
+        unsetenv("TS_USER");
+
+        /* Close all inherited fds to prevent protocol corruption.
+         * The server's connections would be fds 0,1,2,... in the child,
+         * and printf to stdout would write to a server connection. */
+        for (int i = 0; i < 256; i++)
+            close(i);
+
         execl(ts_path, ts_path, "--background", "-f", "sh", "-c", cmd, (char *)NULL);
         exit(1);
     }
