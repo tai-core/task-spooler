@@ -1105,6 +1105,11 @@ int job_is_holding_client(int jobid) {
     return job_is_in_state(jobid, HOLDING_CLIENT);
 }
 
+int job_is_background(int jobid) {
+    struct Job *j = get_job(jobid);
+    return j != NULL && j->is_background;
+}
+
 static int in_notify_list(int jobid) {
     struct Notify *n, *tmp;
 

@@ -466,10 +466,10 @@ client_read(int index) {
             job_finished(&m.u.result, client_cs[index].jobid);
             /* For the dependencies */
             check_notify_list(client_cs[index].jobid);
-            /* We don't want this connection to do anything
-             * more related to the jobid, secially on remove_connection
-             * when we receive the EOC. */
-            client_cs[index].hasjob = 0;
+            /* Don't clear hasjob for background tasks — they persist
+             * and return to c_wait_server_commands for the next RUNJOB. */
+            if (!job_is_background(client_cs[index].jobid))
+                client_cs[index].hasjob = 0;
             break;
         case CLEAR_FINISHED:
             s_clear_finished();
@@ -647,11 +647,16 @@ void fork_background_client(const char *cmd) {
 
         unsetenv("TS_USER");
 
-        /* Close all inherited fds to prevent protocol corruption.
-         * The server's connections would be fds 0,1,2,... in the child,
-         * and printf to stdout would write to a server connection. */
-        for (int i = 0; i < 256; i++)
-            close(i);
+        {
+            int devnull = open("/dev/null", O_RDWR);
+            if (devnull >= 0) {
+                dup2(devnull, 0);
+                dup2(devnull, 1);
+                dup2(devnull, 2);
+                if (devnull > 2)
+                    close(devnull);
+            }
+        }
 
         execl(ts_path, ts_path, "--background", "-f", "sh", "-c", cmd, (char *)NULL);
         exit(1);
