@@ -45,7 +45,7 @@ int max_jobs;
 
 static int cooldown_seconds = 120;
 static char *last_scheduled_user = NULL;
-static time_t last_user_submit_time = 0;
+static time_t last_user_finish_time = 0;
 
 static struct Job *get_job(int jobid);
 
@@ -827,7 +827,6 @@ int s_newjob(int s, struct Msg *m) {
     }
 
     if (p->priority > 0) {
-        last_user_submit_time = time(NULL);
         preempt_background_jobs();
     }
 
@@ -899,9 +898,23 @@ int next_run_job() {
             continue;
         }
 
-        /* cooldown window: skip background tasks if within window */
+        /* cooldown window: skip background tasks if user tasks exist
+         * or if within cooldown period after last user finished */
         if (p->is_background && p->priority == 0) {
-            if ((time(NULL) - last_user_submit_time) < cooldown_seconds) {
+            struct Job *q;
+            int user_exists = 0;
+            for (q = firstjob; q != NULL; q = q->next) {
+                if (!q->is_background &&
+                    (q->state == QUEUED || q->state == ALLOCATING || q->state == RUNNING)) {
+                    user_exists = 1;
+                    break;
+                }
+            }
+            if (user_exists) {
+                p = p->next;
+                continue;
+            }
+            if ((time(NULL) - last_user_finish_time) < cooldown_seconds) {
                 p = p->next;
                 continue;
             }
@@ -1150,6 +1163,9 @@ void job_finished(const struct Result *result, int jobid) {
             pinfo_addinfo(&p->info, 100, "Exit status: died with exit code %i\n", p->result.errorlevel);
         return;
     }
+
+    if (!p->is_background)
+        last_user_finish_time = time(NULL);
 
     if (busy_slots <= 0)
         error("Wrong state in the server. busy_slots = %i instead of greater than 0", busy_slots);
