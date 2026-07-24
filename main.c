@@ -62,6 +62,7 @@ static void default_command_line() {
     command_line.user = NULL;
     command_line.priority = 50;
     command_line.is_background = 0;
+    command_line.post_hook = NULL;
     command_line.cooldown_value = 0;
 }
 
@@ -136,6 +137,7 @@ static struct option longOptions[] = {
         {"get_cooldown",      no_argument,       NULL, 0},
         {"priority",          required_argument, NULL, 'P'},
         {"background",        no_argument,       NULL, 0},
+        {"post-hook",         required_argument, NULL, 0},
         {"version",           no_argument, NULL, 'V'},
         {NULL, 0,                            NULL, 0}
 };
@@ -189,6 +191,8 @@ void parse_opts(int argc, char **argv) {
                 } else if (strcmp(longOptions[optionIdx].name, "background") == 0) {
                     command_line.is_background = 1;
                     command_line.priority = 0;
+                } else if (strcmp(longOptions[optionIdx].name, "post-hook") == 0) {
+                    command_line.post_hook = optarg;
                 } else
                     error("Wrong option %s.", longOptions[optionIdx].name);
                 break;
@@ -453,6 +457,20 @@ void parse_opts(int argc, char **argv) {
         }
     }
 
+    if (command_line.post_hook != NULL) {
+        char *resolved_hook;
+
+        if (!command_line.is_background)
+            error("--post-hook can only be used with --background");
+
+        resolved_hook = realpath(command_line.post_hook, NULL);
+        if (resolved_hook == NULL)
+            error("Cannot resolve post-hook script \"%s\"", command_line.post_hook);
+        if (access(resolved_hook, R_OK) != 0)
+            error("Post-hook script \"%s\" is not readable", resolved_hook);
+        command_line.post_hook = resolved_hook;
+    }
+
     /* if the request is still the default option... 
      * (the default values should be centralized) */
     if (optind < argc && command_line.request == c_LIST) {
@@ -525,6 +543,7 @@ static void print_help(const char *cmd) {
     printf("  TS_ENV              command called on enqueue. Its output determines the job information.\n");
     printf("  TS_SAVELIST         filename which will store the list, if the server dies.\n");
     printf("  TS_SLOTS            amount of jobs which can run at once, read on server start.\n");
+    printf("  TS_BACKGROUND_POST_HOOK  script used to preempt auto-started background jobs.\n");
     printf("  TMPDIR              directory where to place the output files and the default socket.\n");
     printf("Long option actions:\n");
     printf("  --getenv [var]                         get the value of the specified variable in server environment.\n");
@@ -540,14 +559,17 @@ static void print_help(const char *cmd) {
 #ifndef CPU
     printf("  --set_gpu_free_perc   [num]                   set the value of GPU memory threshold above which GPUs are considered available (90 by default).\n");
     printf("  --get_gpu_free_perc                           get the value of GPU memory threshold above which GPUs are considered available.\n");
+#endif
     printf("  --cooldown [seconds]                          set the cooldown window (seconds) before background tasks can run after a user task is submitted (120 by default).\n");
     printf("  --get_cooldown                                get the cooldown window value.\n");
     printf("Long option adding jobs:\n");
+#ifndef CPU
     printf("  --gpus                       || -G [num]      number of GPUs required by the job (1 default).\n");
     printf("  --gpu_indices                || -g [id,...]   the job will be on these GPU indices without checking whether they are free.\n");
+#endif
     printf("  --priority                   || -P [num]      set the priority of the job (0-100, default 50, 0 is background).\n");
     printf("  --background                                  mark this job as a persistent background task (lowest priority, can be preempted).\n");
-#endif
+    printf("  --post-hook [script]                          let this script stop a background task during preemption.\n");
     printf("Actions (can be performed only one at a time):\n");
     printf("  -K           kill the task spooler server\n");
     printf("  -C           clear the list of finished jobs\n");

@@ -79,6 +79,7 @@ Env vars:
   TS_ENV                 command called on enqueue. Its output determines the job information.
   TS_SAVELIST            filename which will store the list, if the server dies.
   TS_SLOTS               amount of jobs which can run at once, read on server start.
+  TS_BACKGROUND_POST_HOOK script used to preempt auto-started background jobs.
   TMPDIR                 directory where to place the output files and the default socket.
 Long option actions:
   --getenv               [var]        get the value of the specified variable in server environment.
@@ -96,6 +97,8 @@ Long option actions:
 Long option adding jobs:
   --gpus               || -G [num]    number of GPUs required by the job (1 default).
   --gpu_indices        || -g [id,...] the job will be on these GPU indices without checking whether they are free.
+  --background                         mark a persistent, preemptible background job.
+  --post-hook [script]                 let this script stop a background job during preemption.
 Actions (can be performed only one at a time):
   -K           kill the task spooler server
   -C           clear the list of finished jobs
@@ -130,6 +133,13 @@ Options adding jobs:
   -L [lab]     name this task with a label, to be distinguished on listing.
   -N [num]     number of slots required by the job (1 default).
 ```
+
+Background jobs without `--post-hook` retain the existing behavior: the server
+sends `SIGTERM` to the job process group. With a hook, the server runs
+`/bin/sh script PID JOB_ID COMMAND` and does not kill the job itself. New
+non-background work remains queued until the background client reports that the
+job exited. The same values are available as `TS_BACKGROUND_PID`,
+`TS_BACKGROUND_JOB_ID`, and `TS_BACKGROUND_COMMAND`.
 
 ## People
 

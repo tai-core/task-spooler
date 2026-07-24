@@ -88,6 +88,10 @@ void c_new_job() {
         m.u.newjob.user_size = strlen(command_line.user) + 1;
     else
         m.u.newjob.user_size = 0;
+    if (command_line.post_hook)
+        m.u.newjob.post_hook_size = strlen(command_line.post_hook) + 1;
+    else
+        m.u.newjob.post_hook_size = 0;
 
     /* Send the message */
     send_msg(server_socket, &m);
@@ -113,9 +117,13 @@ void c_new_job() {
     if (m.u.newjob.user_size > 0)
         send_bytes(server_socket, command_line.user, m.u.newjob.user_size);
 
+    if (m.u.newjob.post_hook_size > 0)
+        send_bytes(server_socket, command_line.post_hook, m.u.newjob.post_hook_size);
+
     free(new_command);
     free(myenv);
     free(command_line.depend_on);
+    free(command_line.post_hook);
 }
 
 int c_wait_newjob_ok() {

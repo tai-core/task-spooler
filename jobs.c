@@ -12,7 +12,10 @@
 #include <sys/time.h>
 #include <time.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #include "main.h"
 #include "cjson/cJSON.h"
@@ -51,6 +54,10 @@ static struct Job *get_job(int jobid);
 
 void notify_errorlevel(struct Job *p);
 
+static void start_background_preemption(struct Job *p);
+
+static void check_background_preemptions();
+
 static void shuffle(int *array, size_t n) {
     if (n > 1) {
         size_t i;
@@ -73,6 +80,7 @@ static void destroy_job(struct Job* p) {
     free(p->label);
     free(p->gpu_ids);
     free(p->user);
+    free(p->post_hook);
     free(p);
 }
 
@@ -207,13 +215,134 @@ void s_kill_all_jobs(int s) {
     }
 }
 
+static void run_post_hook_child(const struct Job *p) {
+    char pid_string[32];
+    char jobid_string[32];
+    long fd_limit;
+    int fd;
+    int devnull;
+
+    snprintf(pid_string, sizeof(pid_string), "%i", p->pid);
+    snprintf(jobid_string, sizeof(jobid_string), "%i", p->jobid);
+
+    setenv("TS_BACKGROUND_PID", pid_string, 1);
+    setenv("TS_BACKGROUND_JOB_ID", jobid_string, 1);
+    setenv("TS_BACKGROUND_COMMAND", p->command, 1);
+
+    fd_limit = sysconf(_SC_OPEN_MAX);
+    if (fd_limit < 0 || fd_limit > 65536)
+        fd_limit = 65536;
+    for (fd = 0; fd < fd_limit; fd++)
+        close(fd);
+
+    devnull = open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+        dup2(devnull, STDIN_FILENO);
+        dup2(devnull, STDOUT_FILENO);
+        dup2(devnull, STDERR_FILENO);
+        if (devnull > STDERR_FILENO)
+            close(devnull);
+    }
+
+    execl("/bin/sh", "sh", p->post_hook, pid_string, jobid_string,
+          p->command, (char *) NULL);
+    _exit(127);
+}
+
+static void start_background_preemption(struct Job *p) {
+    pid_t hook_pid;
+
+    if (!p->preempt_requested || p->state != RUNNING || p->pid <= 0)
+        return;
+
+    if (p->post_hook == NULL) {
+        if (kill(-p->pid, SIGTERM) == -1 && errno != ESRCH)
+            warning("Cannot preempt background job %i with SIGTERM", p->jobid);
+        return;
+    }
+
+    if (p->post_hook_pid != 0)
+        return;
+
+    p->post_hook_finished_time = 0;
+    p->post_hook_exit_warned = 0;
+    hook_pid = fork();
+    if (hook_pid == -1) {
+        p->post_hook_pid = -1;
+        p->post_hook_finished_time = time(NULL);
+        warning("Cannot start post-hook \"%s\" for background job %i",
+                p->post_hook, p->jobid);
+        return;
+    }
+    if (hook_pid == 0)
+        run_post_hook_child(p);
+
+    p->post_hook_pid = hook_pid;
+}
+
+static void check_background_preemptions() {
+    struct Job *p;
+
+    for (p = firstjob; p != NULL; p = p->next) {
+        if (p->post_hook_pid > 0) {
+            int status;
+            pid_t result = waitpid(p->post_hook_pid, &status, WNOHANG);
+
+            if (result == p->post_hook_pid) {
+                p->post_hook_pid = 0;
+                p->post_hook_finished_time = time(NULL);
+                if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+                    warning("Post-hook \"%s\" for background job %i failed",
+                            p->post_hook, p->jobid);
+            } else if (result == -1 && errno != EINTR) {
+                warning("Cannot collect post-hook \"%s\" for background job %i",
+                        p->post_hook, p->jobid);
+                p->post_hook_pid = 0;
+                p->post_hook_finished_time = time(NULL);
+            }
+        }
+
+        if (p->preempt_requested && p->state == RUNNING &&
+            p->post_hook != NULL && p->post_hook_finished_time != 0 &&
+            !p->post_hook_exit_warned &&
+            time(NULL) - p->post_hook_finished_time >= 1) {
+            warning("Background job %i is still running after post-hook \"%s\"; "
+                    "queued non-background jobs remain blocked",
+                    p->jobid, p->post_hook);
+            p->post_hook_exit_warned = 1;
+        }
+    }
+}
+
+int background_preemption_pending() {
+    struct Job *p;
+
+    for (p = firstjob; p != NULL; p = p->next) {
+        if (p->is_background && p->preempt_requested && p->state == RUNNING)
+            return 1;
+    }
+    return 0;
+}
+
+int background_post_hook_pending() {
+    struct Job *p;
+
+    for (p = firstjob; p != NULL; p = p->next) {
+        if (p->post_hook_pid > 0)
+            return 1;
+    }
+    return 0;
+}
+
 void preempt_background_jobs() {
     struct Job *p;
 
     p = firstjob;
     while (p != 0) {
-        if (p->is_background && p->state == RUNNING) {
-            kill(-p->pid, SIGTERM);
+        if (p->is_background && p->state == RUNNING &&
+            !p->preempt_requested) {
+            p->preempt_requested = 1;
+            start_background_preemption(p);
         }
         p = p->next;
     }
@@ -599,6 +728,13 @@ static void init_job(struct Job *p) {
     p->depend_on_size = 0;
     p->gpu_ids = 0;
     p->label = 0;
+    p->user = 0;
+    p->post_hook = 0;
+    p->pid = 0;
+    p->preempt_requested = 0;
+    p->post_hook_pid = 0;
+    p->post_hook_finished_time = 0;
+    p->post_hook_exit_warned = 0;
     p->notify_errorlevel_to_size = 0;
     p->notify_errorlevel_to = 0;
     p->dependency_errorlevel = 0;
@@ -826,7 +962,22 @@ int s_newjob(int s, struct Msg *m) {
         p->user = ptr;
     }
 
-    if (p->priority > 0) {
+    /* load the optional background preemption hook */
+    if (m->u.newjob.post_hook_size > 0) {
+        char *ptr;
+        ptr = (char *) malloc(m->u.newjob.post_hook_size);
+        if (ptr == 0)
+            error("Cannot allocate memory in s_newjob post_hook_size(%i)",
+                  m->u.newjob.post_hook_size);
+        res = recv_bytes(s, ptr, m->u.newjob.post_hook_size);
+        if (res == -1)
+            error("wrong bytes received");
+        p->post_hook = ptr;
+        pinfo_addinfo(&p->info, m->u.newjob.post_hook_size + 20,
+                      "Post-hook: %s\n", ptr);
+    }
+
+    if (!p->is_background) {
         preempt_background_jobs();
     }
 
@@ -868,6 +1019,10 @@ void s_removejob(int jobid) {
 int next_run_job() {
     struct Job *p;
 
+    check_background_preemptions();
+    if (background_preemption_pending())
+        return -1;
+
     const int free_slots = max_slots - busy_slots;
 
     /* busy_slots may be bigger than the maximum slots,
@@ -894,6 +1049,13 @@ int next_run_job() {
     p = firstjob;
     while (p != 0) {
         if (p->state != QUEUED && p->state != ALLOCATING) {
+            p = p->next;
+            continue;
+        }
+
+        /* Do not restart a background job while its previous post-hook
+         * process is still cleaning up. */
+        if (p->is_background && p->post_hook_pid != 0) {
             p = p->next;
             continue;
         }
@@ -1153,6 +1315,10 @@ void job_finished(const struct Result *result, int jobid) {
         if (p->state == RUNNING)
             busy_slots = busy_slots - p->num_slots;
         p->state = QUEUED;
+        p->pid = 0;
+        p->preempt_requested = 0;
+        if (p->post_hook_pid < 0)
+            p->post_hook_pid = 0;
         p->result = *result;
         last_finished_jobid = p->jobid;
         notify_errorlevel(p);
@@ -1252,6 +1418,7 @@ void s_process_runjob_ok(int jobid, char *oname, int pid) {
     p->pid = pid;
     p->output_filename = oname;
     pinfo_set_start_time(&p->info);
+    start_background_preemption(p);
 }
 
 void s_send_runjob(int s, int jobid) {

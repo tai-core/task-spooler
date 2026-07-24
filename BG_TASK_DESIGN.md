@@ -59,6 +59,9 @@ HOLDING_CLIENT → QUEUED → RUNNING → FINISHED/SKIPPED  (普通任务)
 char *user;         // 用户标识 (TS_USER 环境变量, fallback uid)
 int priority;       // 优先级 0-100, 0=背景, 50=默认
 int is_background;  // 是否为背景任务
+char *post_hook;    // 可选的背景任务抢占脚本
+int preempt_requested;
+int post_hook_pid;
 ```
 
 ### `struct CommandLine` 新增字段
@@ -67,6 +70,7 @@ int is_background;  // 是否为背景任务
 char *user;
 int priority;
 int is_background;
+char *post_hook;
 ```
 
 ### `enum Jobstate` 新增
@@ -89,7 +93,8 @@ SET_COOLDOWN, GET_COOLDOWN, GET_COOLDOWN_OK
 
 ```
 next_run_job():
-    ┌─ free_slots <= 0 → return -1
+    ┌─ 有尚未退出的被抢占背景任务 → return -1
+    ├─ free_slots <= 0 → return -1
     ├─ 遍历 firstjob, 收集满足条件的候选任务:
     │   · state == QUEUED 或 ALLOCATING
     │   · 依赖已满足
@@ -111,12 +116,18 @@ next_run_job():
 ```c
 void preempt_background_jobs() {
     for each job in firstjob:
-        if job.is_background && job.state == RUNNING:
-            kill(-job.pid, SIGTERM);  // Server 直接杀进程组
+        if job.is_background && job.state == RUNNING && !job.preempt_requested:
+            job.preempt_requested = true
+            if job.post_hook:
+                fork + exec("/bin/sh", job.post_hook, pid, jobid, command)
+            else:
+                kill(-job.pid, SIGTERM)
 }
 ```
 
-触发时机: 任何 `priority > 0` 的任务提交时 (`s_newjob()` 中调用)。
+触发时机: 任何 `is_background == 0` 的任务提交时 (`s_newjob()` 中调用)，包括显式设置为 `-P 0` 的普通任务。
+调度器在所有 `preempt_requested` 背景任务退出前不派发新的非背景任务。
+post-hook 返回后任务仍存活时记录 warning，但不回退为 Server 直接 kill。
 
 ### 3.3 `job_finished()` — 背景任务重入队
 
@@ -170,6 +181,7 @@ python bg_monitor.py --interval 10
 |------|------|
 | `-P <n>` / `--priority <n>` | 设置任务优先级 (0-100, 默认 50) |
 | `--background` | 标记为背景任务 (自动 priority=0, 可抢占, 持久运行) |
+| `--post-hook <script>` | 背景任务抢占时运行的脚本 |
 | `--cooldown <seconds>` | 设置冷却窗口 (默认 120) |
 | `--get_cooldown` | 查询当前冷却窗口 |
 
@@ -187,6 +199,9 @@ ts -P 80 -G 2 python important.py
 
 # 提交背景任务
 ts --background python bg_cleanup.py
+
+# 使用脚本先保存状态，再由脚本结束背景任务
+ts --background --post-hook /opt/hooks/stop-background.sh python bg_cleanup.py
 
 # 配置文件方式启动 (Server 自动启动后台任务)
 TS_BACKGROUND_CONF=/path/to/bg.conf ts -S 2
@@ -249,7 +264,7 @@ All tests passed!
 
 ## 七、设计决策记录
 
-1. **Server 直接 kill 而非消息**: 背景任务抢占采用 Server 侧 `kill(-pid, SIGTERM)` 而非发送 `PREEMPT` 消息给 Client。因为 Client 在执行任务期间阻塞在 `wait()`，无法接收消息。
+1. **Server 默认直接 kill，可由 post-hook 接管**: 未配置 hook 时采用 Server 侧 `kill(-pid, SIGTERM)`；配置后 Server 只运行 hook，不再直接发信号。因为 Client 在执行任务期间阻塞在 `wait()`，两种路径都由 Server 发起。
 
 2. **背景任务始终 `-f` 模式**: 后台 Client 使用 `-f` (foreground) 标志，不 fork 到后台，保持连接并持久循环等待 `RUNJOB`。
 
@@ -261,5 +276,6 @@ All tests passed!
 
 6. **匿名用户退化为 FIFO**: 未设置 `TS_USER` 的任务 `user == NULL`，不参与 round-robin 调度（`last_scheduled_user` 不更新），退化为提交顺序 FIFO。仅设置了 `TS_USER` 的用户间才按 round-robin 调度。
 
-7. **协议版本未变, 但 `struct Msg` 尺寸增大**: 新增 `priority`、`is_background`、`user_size` 三个 int 字段 (+12 字节)。`PROTOCOL_VERSION`(730) 未更新，新旧二进制的 Msg 结构不兼容。每次部署需确保 Client 和 Server 来自同一构建。
+7. **协议版本随结构变化递增**: `NEWJOB` 增加 `post_hook_size`，`PROTOCOL_VERSION` 从 730 更新为 731，新旧 client/server 会在发送任务前拒绝不兼容连接。
 
+8. **显式抢占屏障**: slot 尚有空余也不能绕过正在退出的背景任务。只有 Server 收到该背景 client 的 `ENDJOB`、将其重新置为 `QUEUED` 后，普通任务才可启动。

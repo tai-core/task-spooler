@@ -272,10 +272,14 @@ static void server_loop(int ls) {
                 maxfd = client_cs[i].socket;
         }
 
-        /* timeout mode if there are queued GPU jobs only */
-        if (s_count_allocating_jobs() > 0)
+        /* Poll while waiting for a post-hook so its child can be collected,
+         * a failed stop can be reported, and queued user work stays blocked. */
+        if (s_count_allocating_jobs() > 0 || background_preemption_pending() ||
+            background_post_hook_pending()) {
+            if (background_preemption_pending() || background_post_hook_pending())
+                tv.tv_sec = 1;
             res = select(maxfd + 1, &readset, NULL, NULL, &tv);
-        else
+        } else
             res = select(maxfd + 1, &readset, NULL, NULL, NULL);
 
         if (res != -1) {
@@ -635,6 +639,7 @@ void fork_background_client(const char *cmd) {
         return;
     }
     if (pid == 0) {
+        const char *post_hook = getenv("TS_BACKGROUND_POST_HOOK");
         char ts_path[4096];
         ssize_t len;
 #ifdef __linux__
@@ -658,7 +663,12 @@ void fork_background_client(const char *cmd) {
             }
         }
 
-        execl(ts_path, ts_path, "--background", "-f", "sh", "-c", cmd, (char *)NULL);
+        if (post_hook)
+            execl(ts_path, ts_path, "--background", "--post-hook", post_hook,
+                  "-f", "sh", "-c", cmd, (char *)NULL);
+        else
+            execl(ts_path, ts_path, "--background", "-f", "sh", "-c", cmd,
+                  (char *)NULL);
         exit(1);
     }
 }

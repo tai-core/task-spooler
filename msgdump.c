@@ -19,6 +19,7 @@ void msgdump(FILE *f, const struct Msg *m)
         case NEWJOB:
             fprintf(f, " NEWJOB\n");
             fprintf(f, " Commandsize: %i\n", m->u.newjob.command_size);
+            fprintf(f, " Post-hook size: %i\n", m->u.newjob.post_hook_size);
             break;
         case NEWJOB_OK:
             fprintf(f, " NEWJOB_OK\n");

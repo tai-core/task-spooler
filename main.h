@@ -9,7 +9,7 @@
 
 enum {
     CMD_LEN = 500,
-    PROTOCOL_VERSION = 730
+    PROTOCOL_VERSION = 731
 };
 
 enum MsgTypes {
@@ -135,6 +135,7 @@ struct CommandLine {
     char *user;
     int priority;
     int is_background;
+    char *post_hook;
     int cooldown_value;
 };
 
@@ -178,6 +179,7 @@ struct Msg {
             int priority;
             int is_background;
             int user_size;
+            int post_hook_size;
         } newjob;
         struct {
             int ofilename_size;
@@ -243,6 +245,11 @@ struct Job {
     char *user;
     int priority;
     int is_background;
+    char *post_hook;
+    int preempt_requested;
+    int post_hook_pid;
+    time_t post_hook_finished_time;
+    int post_hook_exit_warned;
 };
 
 enum ExitCodes {
@@ -431,6 +438,8 @@ void s_set_logdir(const char*);
 void s_set_cooldown(int seconds);
 void s_get_cooldown(int s);
 void preempt_background_jobs();
+int background_preemption_pending();
+int background_post_hook_pending();
 
 /* server.c */
 void server_main(int notify_fd, char *_path);

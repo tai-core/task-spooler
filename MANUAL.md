@@ -24,7 +24,8 @@ Task Spooler (`ts`) 是一个 Unix 任务队列系统，帮助你管理 CPU/GPU 
   bg 执行 → 结束 → 自动重新排队 → 再次执行 → 循环
 
 用户任务到来:
-  bg 正在执行 → 被 SIGTERM 杀死 → 重新排队
+  bg 正在执行 → 默认由 Server 发 SIGTERM，或由 post-hook 结束/挂起 → 重新排队
+  Server 确认 bg 退出
   用户任务开始执行
   用户任务结束 → bg 自动恢复执行（冷却延迟后）
 ```
@@ -43,9 +44,12 @@ Task Spooler (`ts`) 是一个 Unix 任务队列系统，帮助你管理 CPU/GPU 
 
 ### 2.3 抢占（Preemption）
 
-当用户提交新任务（Priority > 0）时，Server 会立即终止正在运行的背景任务（发送 SIGTERM 到其进程组），为你的任务腾出资源。
+当用户提交新的非背景任务时，Server 会抢占正在运行的背景任务，为用户任务腾出资源。
 
-- 抢占是**立刻的**，不需要等待背景任务自然结束
+- 未配置 post-hook 时，Server 沿用原行为，向背景任务进程组发送 `SIGTERM`
+- 配置 post-hook 时，Server 运行脚本，但不会直接向背景任务发送信号；脚本负责保存状态并结束或挂起任务
+- 无论可用 slot 是否足够，新的非背景任务都要等被抢占的背景任务确认退出后才会启动
+- post-hook 返回后背景任务仍未退出，Server 会在 `<TS_SOCKET>.error` 中记录 warning，并继续等待
 - 背景任务的执行结果（包括被 kill）会被记录，然后重新排队
 
 ### 2.4 冷却延迟（Cooldown Window）
@@ -73,11 +77,35 @@ ts --background sh -c 'while true; do echo "bg at $(date)" >> /tmp/bg.log; sleep
 ```
 该命令会持续运行，直到你通过 `ts -K` 或 `ts -r <id>` 终止。
 
+需要在抢占前自行保存状态时，增加 `--post-hook`：
+
+```bash
+ts --background --post-hook /opt/hooks/stop-background.sh python worker.py
+```
+
+脚本由 `/bin/sh` 执行，收到三个位置参数：
+
+```text
+$1  背景任务的进程组 PID
+$2  task-spooler job ID
+$3  背景任务命令
+```
+
+同样的信息也会放入 `TS_BACKGROUND_PID`、`TS_BACKGROUND_JOB_ID` 和
+`TS_BACKGROUND_COMMAND`。脚本应在保存或挂起操作完成后结束任务，例如：
+
+```bash
+#!/bin/sh
+checkpoint_worker "$1"
+kill -TERM -- "-$1"
+```
+
 **方式二：环境变量配置**（推荐用于生产环境）
 
 在启动 Server 之前设置环境变量：
 ```bash
 export TS_BACKGROUND_CMD="sh -c 'while true; do python bg_cleanup.py; sleep 300; done'"
+export TS_BACKGROUND_POST_HOOK=/opt/hooks/stop-background.sh
 ts    # 首次运行 ts 时会自动提交该背景任务
 ```
 
@@ -142,6 +170,7 @@ ts -P 60 python train.py
 |------|------|
 | `--priority \| -P <n>` | **设置优先级**（Priority）。范围 0-100，默认 50。0 为背景任务级别 |
 | `--background` | **标记为背景任务**（Background Task）。自动设 Priority=0，持久循环运行，可被抢占后自动恢复 |
+| `--post-hook <script>` | **设置背景抢占脚本**。仅可与 `--background` 一起使用；脚本负责结束任务 |
 | `--cooldown <seconds>` | **设置冷却窗口**（Cooldown Window）。用户任务提交后多少秒内不调度背景任务，默认 120 |
 | `--get_cooldown` | **查询当前冷却窗口**值 |
 | `-n` | **不存储输出**。任务的标准输出（stdout）和标准错误（stderr）不会被保存到文件 |
@@ -164,6 +193,7 @@ ts -P 60 python train.py
 | `TS_USER` | **用户标识**，用于 Fair 调度区分不同用户 |
 | `TS_BACKGROUND_CMD` | **背景任务命令**，Server 启动时自动提交 |
 | `TS_BACKGROUND_CONF` | **背景任务配置文件**，每行一个命令，`#` 为注释 |
+| `TS_BACKGROUND_POST_HOOK` | **自动背景任务的抢占脚本**，建议使用绝对路径 |
 | `TS_SOCKET` | Unix Socket 路径，默认 `/tmp/socket-ts.<uid>` |
 | `TS_SLOTS` | 最大并发数（Slots），Server 启动时读取 |
 | `TS_MAXFINISHED` | 已完成任务保留数量的上限，默认 1000 |
